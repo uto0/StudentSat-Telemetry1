@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Student Telemetry UI</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root { --bg:#0f1222; --card:#151937; --txt:#e8ecff; --muted:#a2a9d7; --acc:#5cc8ff; --bad:#ff6b6b; --good:#57e39b; }
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Segoe UI,Arial;}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px;}
+  h1{font-size:26px;margin:8px 0 16px}
+  .grid{display:grid;gap:16px;grid-template-columns:1fr;}
+  @media(min-width:900px){ .grid{grid-template-columns:1.2fr 1fr} }
+  .card{background:var(--card);border-radius:16px;padding:16px;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  input,button{background:#0e1230;border:1px solid #283067;color:var(--txt);padding:10px 12px;border-radius:10px}
+  input{flex:1} button{cursor:pointer}
+  .btn{background:linear-gradient(180deg,#2c8cff,#196bff);border:0}
+  .btn-ghost{background:#0e1230}
+  .pill{display:inline-flex;align-items:center;gap:8px;background:#0e1230;border:1px solid #283067;border-radius:999px;padding:6px 10px;color:var(--muted)}
+  .ok{color:var(--good)} .bad{color:var(--bad)}
+  pre{white-space:pre-wrap;word-break:break-word;background:#0d1130;border-radius:12px;padding:12px;border:1px solid #283067;max-height:260px;overflow:auto}
+  table{width:100%;border-collapse:separate;border-spacing:0 8px}
+  th,td{padding:8px 10px;text-align:left}
+  tr{background:#0e1230;border-radius:10px}
+  .k{color:#9dc6ff} .v{color:#ffe08a}
+  .muted{color:var(--muted)}
+  iframe{width:100%;height:420px;border:0;border-radius:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Student Telemetry UI</h1>
+  <div class="grid">
+    <div class="card">
+      <h3>MQTT Connection</h3>
+      <div class="row">
+        <input id="host" value="192.168.0.102" placeholder="Broker IP / Host">
+        <input id="wsport" type="number" value="9001" placeholder="WebSocket Port">
+        <input id="path" value="/mqtt" placeholder="WS Path (e.g. /mqtt)">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="btnConnect" class="btn">Connect</button>
+        <span class="pill">Status: <b id="statusTxt">DISCONNECTED</b></span>
+        <span class="pill">Sub: <code>sat/telemetry</code></span>
+        <span class="pill">Pub: <code>gs/cmd</code></span>
+      </div>
+      <hr style="border-color:#283067;margin:16px 0">
+      <h3>Send Command</h3>
+      <div class="row">
+        <input id="cmdInput" placeholder='TEMP  |  POWER  |  ALL  |  {"cmd":"READ","fields":["TEMP","POWER"]}'>
+        <button id="btnSend" class="btn">Send</button>
+        <button id="btnAll" class="btn-ghost">ALL</button>
+        <button id="btnTemp" class="btn-ghost">TEMP</button>
+        <button id="btnPower" class="btn-ghost">POWER</button>
+        <button id="btnGPS" class="btn-ghost">GPS</button>
+      </div>
+      <h3 style="margin-top:20px">Latest Telemetry</h3>
+      <pre id="telemetryBox">—</pre>
+      <h3>Parsed Fields</h3>
+      <table><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody id="fieldsBody"></tbody></table>
+    </div>
+
+    <div class="card">
+      <h3>Gamification</h3>
+      <p class="muted">Correct commands & valid telemetry add points. Wrong ones deduct.</p>
+      <div class="row" style="margin-bottom:8px">
+        <span class="pill">Score: <b id="scoreTxt">0</b></span>
+        <span class="pill">Good: <b id="goodTxt">0</b></span>
+        <span class="pill">Bad: <b id="badTxt">0</b></span>
+        <button id="btnReset" class="btn-ghost">Reset Score</button>
+      </div>
+      <h3>Grafana (optional)</h3>
+      <input id="grafUrl" placeholder="Grafana panel URL (optional)" value="">
+      <div style="margin-top:10px"><iframe id="grafFrame" src="about:blank" title="Grafana Panel"></iframe></div>
+      <h3 style="margin-top:20px">Logs</h3>
+      <pre id="logBox">—</pre>
+    </div>
+  </div>
+</div>
+
+<script>
+let client=null; let score=Number(localStorage.getItem("score")||0);
+let good=Number(localStorage.getItem("good")||0);
+let bad=Number(localStorage.getItem("bad")||0);
+const topics={sub:"sat/telemetry", pub:"gs/cmd"};
+function log(m){const b=document.getElementById("logBox");b.textContent=(b.textContent==="—"?"":b.textContent+"\n")+m;b.scrollTop=b.scrollHeight;}
+function setStatus(s){document.getElementById("statusTxt").textContent=s;}
+function updateScore(){document.getElementById("scoreTxt").textContent=score;document.getElementById("goodTxt").textContent=good;document.getElementById("badTxt").textContent=bad;}
+function addGood(n){good+=n;score+=n*10;localStorage.setItem("good",good);localStorage.setItem("score",score);updateScore();}
+function addBad(n){bad+=n;score-=n*5;localStorage.setItem("bad",bad);localStorage.setItem("score",score);updateScore();}
+updateScore();
+document.getElementById("btnReset").onclick=()=>{score=0;good=0;bad=0;localStorage.setItem("score",0);localStorage.setItem("good",0);localStorage.setItem("bad",0);updateScore();};
+document.getElementById("btnConnect").onclick=()=>{
+  const host=document.getElementById("host").value.trim();
+  const port=Number(document.getElementById("wsport").value.trim()||9001);
+  const path=document.getElementById("path").value.trim()||"/mqtt";
+  if(client){try{client.end(true);}catch(e){} client=null;}
+  const url=`ws://${host}:${port}${path}`; log("Connecting: "+url); setStatus("CONNECTING");
+  client=mqtt.connect(url,{reconnectPeriod:2000,clean:true,clientId:"student-ui-"+Math.random().toString(16).slice(2)});
+  client.on("connect",()=>{setStatus("CONNECTED");log("Connected. Subscribing "+topics.sub);client.subscribe(topics.sub,{qos:0},(err)=>{if(err){log("Sub error: "+err);setStatus("ERROR");return;} log("Subscribed: "+topics.sub);});});
+  client.on("message",(topic,payload)=>{const txt=payload.toString();log("RX ["+topic+"]: "+txt); if(topic===topics.sub) handleTelemetry(txt);});
+  client.on("error",(err)=>{setStatus("ERROR");log("MQTT error: "+err);});
+  client.on("close",()=>{setStatus("DISCONNECTED");log("MQTT closed");});
+};
+function publishCmd(s){
+  if(!client||client.disconnected){alert("Not connected");return;}
+  s=(s||"").trim(); if(!s) return;
+  client.publish(topics.pub,s,{qos:0},(err)=>{ if(err){log("Publish error: "+err);return;} log("TX ["+topics.pub+"]: "+s);
+    let ok=false; if(/^[A-Z_]+$/.test(s)) ok=true; else{ try{const j=JSON.parse(s);ok=(j&&j.cmd&&Array.isArray(j.fields));}catch{} }
+    ok?addGood(1):addBad(1);
+  });
+}
+document.getElementById("btnSend").onclick=()=>publishCmd(document.getElementById("cmdInput").value);
+document.getElementById("btnAll").onclick =()=>publishCmd("ALL");
+document.getElementById("btnTemp").onclick=()=>publishCmd("TEMP");
+document.getElementById("btnPower").onclick=()=>publishCmd("POWER");
+document.getElementById("btnGPS").onclick =()=>publishCmd("GPS");
+function handleTelemetry(txt){
+  const box=document.getElementById("telemetryBox"); box.textContent=txt;
+  let j=null; try{ j=JSON.parse(txt);}catch(e){addBad(1);return;}
+  const f=(j&&j.fields&&typeof j.fields==="object")?j.fields:j;
+  if(!f||typeof f!=="object"){addBad(1);return;}
+  const tbody=document.getElementById("fieldsBody"); tbody.innerHTML="";
+  let c=0; Object.keys(f).forEach(k=>{const val=f[k]; const tr=document.createElement("tr"); const td1=document.createElement("td"); td1.innerHTML=`<span class="k">${k}</span>`; const td2=document.createElement("td"); td2.innerHTML=`<span class="v">${val}</span>`; tr.appendChild(td1); tr.appendChild(td2); tbody.appendChild(tr); c++;});
+  if(c>0) addGood(1);
+}
+const grafUrlInput=document.getElementById("grafUrl"); const grafFrame=document.getElementById("grafFrame");
+grafUrlInput.addEventListener("change",()=>{const u=grafUrlInput.value.trim(); grafFrame.src=u||"about:blank";});
+</script>
+</body>
+</html>
